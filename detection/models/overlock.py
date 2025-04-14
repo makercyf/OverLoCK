@@ -12,10 +12,13 @@ from natten.functional import na2d_av
 from torch.utils.checkpoint import checkpoint
 from timm.models.layers import DropPath, to_2tuple
 from timm.models.registry import register_model
-from mmseg.models.builder import MODELS
-from mmseg.utils import get_root_logger
-from mmcv.runner import load_checkpoint
-
+from mmdet.models.builder import MODELS
+from mmdet.utils import get_root_logger
+try:
+    from mmcv.runner import load_checkpoint
+except:
+    from mmengine.runner import load_checkpoint
+    
 def get_conv2d(in_channels, 
                out_channels, 
                kernel_size, 
@@ -608,7 +611,7 @@ class OverLoCK(nn.Module):
         super().__init__()
         
         fusion_dim = embed_dim[-1] + embed_dim[-1]//4
-        self.num_classes = num_classes
+        # self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim
 
         self.patch_embed1 = stem(in_chans, embed_dim[0])
@@ -734,6 +737,11 @@ class OverLoCK(nn.Module):
                 )
             )
 
+        self.h_proj = nn.Sequential(
+            nn.Conv2d(embed_dim[-1], fusion_dim, kernel_size=1),
+            LayerScale(fusion_dim, init_value=1e-5),
+        )
+        
         # Aux Cls Head
         if use_ds:
             self.aux_head = nn.Sequential(
@@ -757,6 +765,7 @@ class OverLoCK(nn.Module):
             if idx >= 2:
                 dim = dim + embed_dim[-1]//4
             self.extra_norm.append(norm_layer(dim))
+        self.extra_norm.append(norm_layer(embed_dim[-1]))
         
         del self.aux_head
         del self.head
@@ -771,7 +780,6 @@ class OverLoCK(nn.Module):
         elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, nn.BatchNorm1d)):
             nn.init.constant_(m.weight, 1.0)
             nn.init.constant_(m.bias, 0)
-    
     
     def _convert_sync_batchnorm(self):
         if torch.distributed.is_initialized():
@@ -813,7 +821,7 @@ class OverLoCK(nn.Module):
         
         outs = []
         
-        # ctx_cls = ctx
+        ctx_cls = ctx
         ctx_ori = self.high_level_proj(ctx)
         ctx_up = F.interpolate(ctx_ori, scale_factor=2, mode='bilinear', align_corners=False)
         
@@ -828,7 +836,10 @@ class OverLoCK(nn.Module):
         for idx, blk in enumerate(self.sub_blocks4):
             x, ctx = blk(x, ctx, ctx_ori)
         
-        outs.append(self.extra_norm[3](x))
+        ctx = self.extra_norm[-1](ctx_cls)
+        x = self.extra_norm[3](x) + self.h_proj(ctx)
+        
+        outs.append(x)
         
         return outs
 
