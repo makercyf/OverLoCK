@@ -25,6 +25,13 @@ from timm.utils import accuracy, AverageMeter, natural_key, setup_default_loggin
 
 import models
 
+import numpy as np
+import torch.nn.functional as F
+from sklearn.metrics import (
+    accuracy_score, roc_auc_score, f1_score, average_precision_score,
+    hamming_loss, jaccard_score, recall_score, precision_score, cohen_kappa_score
+)
+
 has_apex = False
 try:
     from apex import amp
@@ -115,6 +122,9 @@ parser.add_argument('--valid-labels', default='', type=str, metavar='FILENAME',
 
 
 def validate(args):
+    torch.manual_seed(4840)
+    np.random.seed(4840)
+
     # might as well try to validate something
     args.pretrained = args.pretrained or not args.checkpoint
     args.prefetcher = not args.no_prefetcher
@@ -205,33 +215,36 @@ def validate(args):
         num_workers=args.workers,
         crop_pct=crop_pct,
         pin_memory=args.pin_mem,
-        tf_preprocessing=args.tf_preprocessing)
+        tf_preprocessing=args.tf_preprocessing,
+        shuffle=False)
 
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
+    true_onehot, pred_onehot, true_labels, pred_labels, pred_softmax = [], [], [], [], []
+
     model.eval()
     with torch.no_grad():
         # warmup, reduce variability of first batch time, especially for comparing torchscript vs non
-        input = torch.randn((args.batch_size,) + tuple(data_config['input_size'])).cuda()
+        input_size = torch.randn((args.batch_size,) + tuple(data_config['input_size'])).cuda()
         if args.channels_last:
-            input = input.contiguous(memory_format=torch.channels_last)
-        model(input)
+            input_size = input_size.contiguous(memory_format=torch.channels_last)
+        model(input_size)
         pbar = tqdm(total=len(dataset))
         end = time.time()
         
-        for input, target in loader:
+        for input_image, target in loader:
             if args.no_prefetcher:
                 target = target.cuda(non_blocking=args.pin_mem)
-                input = input.cuda(non_blocking=args.pin_mem)
+                input_image = input_image.cuda(non_blocking=args.pin_mem)
             if args.channels_last:
-                input = input.contiguous(memory_format=torch.channels_last)
+                input_image = input_image.contiguous(memory_format=torch.channels_last)
 
             # compute output
             with amp_autocast():
-                output = model(input)
+                output = model(input_image)
                 if valid_labels is not None:
                     output = output[:, valid_labels]
                 loss = criterion(output, target)
@@ -240,9 +253,21 @@ def validate(args):
 
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output.detach(), target, topk=(1, 5))
-            losses.update(loss.item(), input.size(0))
-            top1.update(acc1.item(), input.size(0))
-            top5.update(acc5.item(), input.size(0))
+            losses.update(loss.item(), input_image.size(0))
+            top1.update(acc1.item(), input_image.size(0))
+            top5.update(acc5.item(), input_image.size(0))
+
+            # metrics
+            output_softmax = nn.Softmax(dim=1)(output)
+            output_label = output_softmax.argmax(dim=1)
+            target_onehot = F.one_hot(target.to(torch.int64), num_classes=args.num_classes)
+            output_onehot = F.one_hot(output_label.to(torch.int64), num_classes=args.num_classes)
+
+            true_onehot.extend(target_onehot.cpu().numpy())
+            pred_onehot.extend(output_onehot.detach().cpu().numpy())
+            true_labels.extend(target.cpu().numpy())
+            pred_labels.extend(output_label.detach().cpu().numpy())
+            pred_softmax.extend(output_softmax.detach().cpu().numpy())
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -257,12 +282,28 @@ def validate(args):
     else:
         top1a, top5a = top1.avg, top5.avg
 
+    accuracy_val = accuracy_score(true_labels, pred_labels)
+    hamming = hamming_loss(true_onehot, pred_onehot)
+    jaccard = jaccard_score(true_onehot, pred_onehot, average='macro')
+    average_precision = average_precision_score(true_onehot, pred_softmax, average='macro')
+    kappa = cohen_kappa_score(true_labels, pred_labels)
+    f1 = f1_score(true_onehot, pred_onehot, zero_division=0, average='macro')
+    roc_auc = roc_auc_score(true_onehot, pred_softmax, multi_class='ovr', average='macro')
+    precision = precision_score(true_onehot, pred_onehot, zero_division=0, average='macro')
+    recall = recall_score(true_onehot, pred_onehot, zero_division=0, average='macro')
+
+    score = (f1 + roc_auc + kappa) / 3
+
+    print(f'Accuracy: {accuracy_val:.4f}, F1 Score: {f1:.4f}, ROC AUC: {roc_auc:.4f}, Hamming Loss: {hamming:.4f},\n'
+          f' Jaccard Score: {jaccard:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f},\n'
+          f' Average Precision: {average_precision:.4f}, Kappa: {kappa:.4f}, Score: {score:.4f}')
+
     results = OrderedDict(top1=round(top1a, 4), top1_err=round(100 - top1a, 4),
                           top5=round(top5a, 4), top5_err=round(100 - top5a, 4),
                           param_count=round(param_count / 1e6, 2),
                           img_size=data_config['input_size'][-1],
                           crop_pct=crop_pct,
-                          interpolation=data_config['interpolation'])
+                          interpolation=data_config['interpolation'],)
 
     _logger.info(
         dict(model=args.model,
