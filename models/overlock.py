@@ -31,7 +31,7 @@ def get_conv2d(in_channels,
     else:
         padding = to_2tuple(padding)
     need_large_impl = kernel_size[0] == kernel_size[1] and kernel_size[0] > 5 and padding == (kernel_size[0] // 2, kernel_size[1] // 2)
-
+    attempt_use_lk_impl=False
     if attempt_use_lk_impl and need_large_impl:
         print('---------------- trying to import iGEMM implementation for large-kernel conv')
         try:
