@@ -351,7 +351,7 @@ def main(args):
     args.distributed = False
     # args.device = 'cuda:0'
     # args.world_size = 1
-    # args.rank = 0  # global rank
+    args.rank = 0  # global rank
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.distributed = True
         args.rank = int(os.environ["RANK"])
