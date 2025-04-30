@@ -216,7 +216,7 @@ def validate(args):
         crop_pct=crop_pct,
         pin_memory=args.pin_mem,
         tf_preprocessing=args.tf_preprocessing,
-        shuffle=False)
+        is_training=False)
 
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -273,9 +273,14 @@ def validate(args):
             batch_time.update(time.time() - end)
             end = time.time()
             pbar.update(args.batch_size)
-            
+
     pbar.close()
-    
+
+    save_dir = "result"
+    os.makedirs(save_dir, exist_ok=True)
+    np.save(os.path.join(save_dir, 'pred_softmax.npy'), np.vstack(pred_softmax))
+    np.save(os.path.join(save_dir, 'true_labels.npy'), np.array(true_labels))
+
     if real_labels is not None:
         # real labels mode replaces topk values at the end
         top1a, top5a = real_labels.get_accuracy(k=1), real_labels.get_accuracy(k=5)
